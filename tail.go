@@ -26,14 +26,15 @@ var (
 )
 
 type Line struct {
-	Text string
-	Time time.Time
-	Err  error // Error from tail
+	Text   string
+	Time   time.Time
+	LineNO int64
+	Err    error // Error from tail
 }
 
 // NewLine returns a Line with present time.
 func NewLine(text string) *Line {
-	return &Line{text, time.Now(), nil}
+	return &Line{text, time.Now(), 0, nil}
 }
 
 // SeekInfo represents arguments to `os.Seek`
@@ -254,6 +255,7 @@ func (tail *Tail) tailFileSync() {
 	var err error
 
 	// Read line by line.
+	var lineNO int64
 	for {
 		// do not seek in named pipes
 		if !tail.Pipe {
@@ -266,16 +268,17 @@ func (tail *Tail) tailFileSync() {
 		}
 
 		line, err := tail.readLine()
+		lineNO++
 
 		// Process `line` even if err is EOF.
 		if err == nil {
-			cooloff := !tail.sendLine(line)
+			cooloff := !tail.sendLine(line, lineNO)
 			if cooloff {
 				// Wait a second before seeking till the end of
 				// file when rate limit is reached.
 				msg := ("Too much log activity; waiting a second " +
 					"before resuming tailing")
-				tail.Lines <- &Line{msg, time.Now(), errors.New(msg)}
+				tail.Lines <- &Line{msg, time.Now(), lineNO, errors.New(msg)}
 				select {
 				case <-time.After(time.Second):
 				case <-tail.Dying():
@@ -289,7 +292,7 @@ func (tail *Tail) tailFileSync() {
 		} else if err == io.EOF {
 			if !tail.Follow {
 				if line != "" {
-					tail.sendLine(line)
+					tail.sendLine(line, lineNO)
 				}
 				return
 			}
@@ -307,12 +310,15 @@ func (tail *Tail) tailFileSync() {
 			// When EOF is reached, wait for more data to become
 			// available. Wait strategy is based on the `tail.watcher`
 			// implementation (inotify or polling).
-			err := tail.waitForChanges()
+			bReopen, err := tail.waitForChanges()
 			if err != nil {
 				if err != ErrStop {
 					tail.Kill(err)
 				}
 				return
+			}
+			if bReopen {
+				lineNO = 0
 			}
 		} else {
 			// non-EOF error
@@ -334,47 +340,47 @@ func (tail *Tail) tailFileSync() {
 // waitForChanges waits until the file has been appended, deleted,
 // moved or truncated. When moved or deleted - the file will be
 // reopened if ReOpen is true. Truncated files are always reopened.
-func (tail *Tail) waitForChanges() error {
+func (tail *Tail) waitForChanges() (bReopen bool, err error) {
 	if tail.changes == nil {
 		pos, err := tail.file.Seek(0, os.SEEK_CUR)
 		if err != nil {
-			return err
+			return false, err
 		}
 		tail.changes, err = tail.watcher.ChangeEvents(&tail.Tomb, pos)
 		if err != nil {
-			return err
+			return false, err
 		}
 	}
 
 	select {
 	case <-tail.changes.Modified:
-		return nil
+		return false, nil
 	case <-tail.changes.Deleted:
 		tail.changes = nil
 		if tail.ReOpen {
 			// XXX: we must not log from a library.
 			tail.Logger.Printf("Re-opening moved/deleted file %s ...", tail.Filename)
 			if err := tail.reopen(); err != nil {
-				return err
+				return true, err
 			}
 			tail.Logger.Printf("Successfully reopened %s", tail.Filename)
 			tail.openReader()
-			return nil
+			return true, nil
 		} else {
 			tail.Logger.Printf("Stopping tail as file no longer exists: %s", tail.Filename)
-			return ErrStop
+			return false, ErrStop
 		}
 	case <-tail.changes.Truncated:
 		// Always reopen truncated files (Follow is true)
 		tail.Logger.Printf("Re-opening truncated file %s ...", tail.Filename)
 		if err := tail.reopen(); err != nil {
-			return err
+			return false, err
 		}
 		tail.Logger.Printf("Successfully reopened truncated %s", tail.Filename)
 		tail.openReader()
-		return nil
+		return false, nil
 	case <-tail.Dying():
-		return ErrStop
+		return false, ErrStop
 	}
 	panic("unreachable")
 }
@@ -404,7 +410,7 @@ func (tail *Tail) seekTo(pos SeekInfo) error {
 
 // sendLine sends the line(s) to Lines channel, splitting longer lines
 // if necessary. Return false if rate limit is reached.
-func (tail *Tail) sendLine(line string) bool {
+func (tail *Tail) sendLine(line string, lineNO int64) bool {
 	now := time.Now()
 	lines := []string{line}
 
@@ -414,7 +420,7 @@ func (tail *Tail) sendLine(line string) bool {
 	}
 
 	for _, line := range lines {
-		tail.Lines <- &Line{line, now, nil}
+		tail.Lines <- &Line{line, now, lineNO, nil}
 	}
 
 	if tail.Config.RateLimiter != nil {
