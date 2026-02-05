@@ -386,7 +386,7 @@ func (tail *Tail) waitForChanges() (bReopen bool, err error) {
 		}
 		tail.Logger.Printf("Successfully reopened truncated %s", tail.Filename)
 		tail.openReader()
-		return false, nil
+		return true, nil
 	case <-tail.Dying():
 		return false, ErrStop
 	}

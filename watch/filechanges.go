@@ -1,5 +1,7 @@
 package watch
 
+import "time"
+
 type FileChanges struct {
 	Modified  chan bool // Channel to get notified of modifications
 	Truncated chan bool // Channel to get notified of truncations
@@ -16,10 +18,14 @@ func (fc *FileChanges) NotifyModified() {
 }
 
 func (fc *FileChanges) NotifyTruncated() {
+	fc.NotifyModified() // 先检查是否有数据可读，再发送删除信号
+	time.Sleep(time.Millisecond * 100)
 	sendOnlyIfEmpty(fc.Truncated)
 }
 
 func (fc *FileChanges) NotifyDeleted() {
+	fc.NotifyModified() // 先检查是否有数据可读，再发送删除信号
+	time.Sleep(time.Millisecond * 100)
 	sendOnlyIfEmpty(fc.Deleted)
 }
 

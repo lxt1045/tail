@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"time"
 
 	"github.com/hpcloud/tail/util"
 
@@ -65,21 +67,38 @@ func (fw *InotifyFileWatcher) BlockUntilExists(t *tomb.Tomb) error {
 	panic("unreachable")
 }
 
+// 如果 inotify 消息有问题，则定时检查file stats
 func (fw *InotifyFileWatcher) ChangeEvents(t *tomb.Tomb, pos int64) (*FileChanges, error) {
-	err := Watch(fw.Filename)
+	origF, err := os.Open(fw.Filename)
+	// origFi, err := os.Stat(fw.Filename)
 	if err != nil {
 		return nil, err
 	}
+	origFi, err := origF.Stat()
+	if err != nil {
+		return nil, err
+	}
+	err = Watch(fw.Filename)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+		}
+	}()
 
 	changes := NewFileChanges()
 	fw.Size = pos
 
 	go func() {
 
+		ticker := time.NewTicker(time.Duration(time.Second * 1))
+		defer ticker.Stop()
 		events := Events(fw.Filename)
+		prevSize, pollPrevSize := fw.Size, fw.Size
+		prevModTime := origFi.ModTime()
 
 		for {
-			prevSize := fw.Size
 
 			var evt fsnotify.Event
 			var ok bool
@@ -93,9 +112,54 @@ func (fw *InotifyFileWatcher) ChangeEvents(t *tomb.Tomb, pos int64) (*FileChange
 			case <-t.Dying():
 				RemoveWatch(fw.Filename)
 				return
+			case <-ticker.C:
 			}
 
 			switch {
+			case !ok: // ticker 超时; 没有收到inotify消息
+				fi, err := os.Stat(fw.Filename)
+				if err != nil {
+					// Windows cannot delete a file if a handle is still open (tail keeps one open)
+					// so it gives access denied to anything trying to read it until all handles are released.
+					if os.IsNotExist(err) || (runtime.GOOS == "windows" && os.IsPermission(err)) {
+						// File does not exist (has been deleted).
+						RemoveWatch(fw.Filename)
+						changes.NotifyDeleted()
+						return
+					}
+
+					// XXX: report this error back to the user
+					util.Fatal("Failed to stat file %v: %v", fw.Filename, err)
+				}
+
+				// File got moved/renamed?
+				if !os.SameFile(origFi, fi) {
+					RemoveWatch(fw.Filename)
+					changes.NotifyDeleted()
+					return
+				}
+
+				// File got truncated?
+				fw.Size = fi.Size()
+				if pollPrevSize > 0 && pollPrevSize > fw.Size {
+					changes.NotifyTruncated()
+					pollPrevSize = fw.Size
+					continue
+				}
+				// File got bigger?
+				if pollPrevSize > 0 && pollPrevSize < fw.Size {
+					changes.NotifyModified()
+					pollPrevSize = fw.Size
+					continue
+				}
+				pollPrevSize = fw.Size
+
+				// File was appended to (changed)?
+				modTime := fi.ModTime()
+				if modTime != prevModTime {
+					prevModTime = modTime
+					changes.NotifyModified()
+				}
 			case evt.Op&fsnotify.Remove == fsnotify.Remove:
 				fallthrough
 
@@ -109,7 +173,8 @@ func (fw *InotifyFileWatcher) ChangeEvents(t *tomb.Tomb, pos int64) (*FileChange
 				fallthrough
 
 			case evt.Op&fsnotify.Write == fsnotify.Write:
-				fi, err := os.Stat(fw.Filename)
+				// fi, err := os.Stat(fw.Filename)
+				fi, err := origF.Stat()
 				if err != nil {
 					if os.IsNotExist(err) {
 						RemoveWatch(fw.Filename)
