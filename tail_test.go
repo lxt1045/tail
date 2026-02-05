@@ -8,6 +8,7 @@ package tail
 
 import (
 	_ "fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"strings"
@@ -178,7 +179,7 @@ func TestLocationFullDontFollow(t *testing.T) {
 func TestLocationEnd(t *testing.T) {
 	tailTest := NewTailTest("location-end", t)
 	tailTest.CreateFile("test.txt", "hello\nworld\n")
-	tail := tailTest.StartTail("test.txt", Config{Follow: true, Location: &SeekInfo{0, os.SEEK_END}})
+	tail := tailTest.StartTail("test.txt", Config{Follow: true, Location: &SeekInfo{0, os.SEEK_END, 0}})
 	go tailTest.VerifyTailOutput(tail, []string{"more", "data"}, false)
 
 	<-time.After(100 * time.Millisecond)
@@ -195,7 +196,7 @@ func TestLocationMiddle(t *testing.T) {
 	// Test reading from middle.
 	tailTest := NewTailTest("location-middle", t)
 	tailTest.CreateFile("test.txt", "hello\nworld\n")
-	tail := tailTest.StartTail("test.txt", Config{Follow: true, Location: &SeekInfo{-6, os.SEEK_END}})
+	tail := tailTest.StartTail("test.txt", Config{Follow: true, Location: &SeekInfo{-6, os.SEEK_END, 0}})
 	go tailTest.VerifyTailOutput(tail, []string{"world", "more", "data"}, false)
 
 	<-time.After(100 * time.Millisecond)
@@ -263,7 +264,7 @@ func TestTell(t *testing.T) {
 	tailTest.CreateFile("test.txt", "hello\nworld\nagain\nmore\n")
 	config := Config{
 		Follow:   false,
-		Location: &SeekInfo{0, os.SEEK_SET}}
+		Location: &SeekInfo{0, os.SEEK_SET, 0}}
 	tail := tailTest.StartTail("test.txt", config)
 	// read noe line
 	<-tail.Lines
@@ -276,7 +277,7 @@ func TestTell(t *testing.T) {
 
 	config = Config{
 		Follow:   false,
-		Location: &SeekInfo{offset, os.SEEK_SET}}
+		Location: &SeekInfo{offset, os.SEEK_SET, 0}}
 	tail = tailTest.StartTail("test.txt", config)
 	for l := range tail.Lines {
 		// it may readed one line in the chan(tail.Lines),
@@ -560,4 +561,89 @@ func (t TailTest) Cleanup(tail *Tail, stop bool) {
 		tail.Stop()
 	}
 	tail.Cleanup()
+}
+
+func TestLineNO(t *testing.T) {
+	tailTest := NewTailTest("line_no", t)
+	str := "hello\nworld\nagain\nmore\n"
+	strs := strings.Split("hello\nworld\nagain\nmore\n", "\n")
+	tailTest.CreateFile("test.txt", str)
+	config := Config{
+		Follow:   false,
+		Location: &SeekInfo{0, io.SeekStart, 0}}
+	tail := tailTest.StartTail("test.txt", config)
+	// read noe line
+	l0 := <-tail.Lines
+	l1 := <-tail.Lines
+	l2 := <-tail.Lines
+	l3 := <-tail.Lines
+	tailTest.Logf("line: %+v", l0)
+	tailTest.Logf("line: %+v", l1)
+	tailTest.Logf("line: %+v", l2)
+	tailTest.Logf("line: %+v", l3)
+	{
+		if l0.Text != strs[0] {
+			tailTest.Fatalf("Text mismatch; expected %s, but got %s",
+				strs[0], l0.Text)
+		}
+		if l0.Offset != 0 {
+			tailTest.Fatalf("Offset mismatch; expected %d, but got %d",
+				0, l0.Offset)
+		}
+		if l0.LineNO != 1 {
+			tailTest.Fatalf("LineNO mismatch; expected %d, but got %d",
+				1, l0.LineNO)
+		}
+		if l1.Text != strs[1] {
+			tailTest.Fatalf("Text mismatch; expected %s, but got %s",
+				strs[1], l1.Text)
+		}
+		if l1.Offset != l0.NextOffset() {
+			tailTest.Fatalf("Offset mismatch; expected %d, but got %d",
+				l0.NextOffset(), l1.Offset)
+		}
+		if l1.LineNO != 2 {
+			tailTest.Fatalf("LineNO mismatch; expected %d, but got %d",
+				2, l1.LineNO)
+		}
+	}
+	// tail.Done()
+	// tail.close()
+	err := tail.Stop()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// l1 := l0
+	config = Config{
+		Follow:   false,
+		Location: &SeekInfo{l1.NextOffset(), io.SeekStart, l1.LineNO}}
+	tail = tailTest.StartTail("test.txt", config)
+	defer func() {
+		tailTest.RemoveFile("test.txt")
+		err := tail.Stop()
+		if err != nil {
+			t.Fatal(err)
+		}
+		tail.Cleanup()
+	}()
+	offset, lineNO := l1.NextOffset(), l1.LineNO+1
+	for i := 2; i < len(strs)-1; i++ {
+		l0 := <-tail.Lines
+		tailTest.Logf("line: %+v", l0)
+		if l0.Text != strs[i] {
+			tailTest.Fatalf("mismatch; expected %s, but got %s",
+				strs[i], l0.Text)
+		}
+		if l0.Offset != offset {
+			tailTest.Fatalf("Offset mismatch; expected %d, but got %d",
+				offset, l0.Offset)
+		}
+		offset += int64(len(l0.Text) + 1)
+		if l0.LineNO != lineNO {
+			tailTest.Fatalf("LineNO mismatch; expected %d, but got %d",
+				1, l0.LineNO)
+		}
+		lineNO = l0.LineNO + 1
+	}
 }

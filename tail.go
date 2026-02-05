@@ -33,6 +33,10 @@ type Line struct {
 	Err    error // Error from tail
 }
 
+func (l *Line) NextOffset() int64 {
+	return l.Offset + int64(len(l.Text)) + 1
+}
+
 // NewLine returns a Line with present time.
 func NewLine(text string, lineNO, offset int64) *Line {
 	return &Line{text, time.Now(), lineNO, offset, nil}
@@ -42,6 +46,7 @@ func NewLine(text string, lineNO, offset int64) *Line {
 type SeekInfo struct {
 	Offset int64
 	Whence int // os.SEEK_*
+	LineNO int64
 }
 
 type logger interface {
@@ -240,6 +245,7 @@ func (tail *Tail) tailFileSync() {
 		}
 	}
 
+	var lineNO int64
 	// Seek to requested location on first open of the file.
 	if tail.Location != nil {
 		_, err := tail.file.Seek(tail.Location.Offset, tail.Location.Whence)
@@ -248,6 +254,7 @@ func (tail *Tail) tailFileSync() {
 			tail.Killf("Seek error on %s: %s", tail.Filename, err)
 			return
 		}
+		lineNO = tail.Location.LineNO
 	}
 
 	tail.openReader()
@@ -256,7 +263,6 @@ func (tail *Tail) tailFileSync() {
 	var err error
 
 	// Read line by line.
-	var lineNO int64
 	for {
 		// do not seek in named pipes
 		if !tail.Pipe {
@@ -293,6 +299,7 @@ func (tail *Tail) tailFileSync() {
 		} else if err == io.EOF {
 			if !tail.Follow {
 				if line != "" {
+					lineNO++
 					tail.sendLine(line, lineNO, offset)
 				}
 				return
